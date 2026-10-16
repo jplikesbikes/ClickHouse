@@ -1,0 +1,13 @@
+1
+AggregateFunction(uniqTheta, UInt64)	AggregateFunction(uniqTheta(16), UInt64)
+50000
+1
+50000
+50000
+0	12500
+1	12500
+2	12500
+3	12500
+50000
+50000
+1	1	AggregateFunction(uniqTheta(16), UInt64)	AggregateFunction(uniqTheta, UInt64)

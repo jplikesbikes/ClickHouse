@@ -216,12 +216,22 @@ struct AggregateFunctionUniqExactDataForVariadic : AggregateFunctionUniqExactDat
 };
 
 /// uniqTheta
+
+/// `datasketches::theta_constants::DEFAULT_LG_K`, spelled out because the classes below carry it for every `uniq*`
+/// function and must compile without datasketches. Asserted against the library where it is available.
+static constexpr UInt8 UNIQ_THETA_DEFAULT_LG_K = 12;
+
 #if USE_DATASKETCHES
+
+static_assert(UNIQ_THETA_DEFAULT_LG_K == datasketches::theta_constants::DEFAULT_LG_K);
 
 struct AggregateFunctionUniqThetaData
 {
     using Set = ThetaSketchData<UInt64>;
     Set set;
+
+    AggregateFunctionUniqThetaData() = default;
+    explicit AggregateFunctionUniqThetaData(UInt8 lg_k) : set(lg_k) {}
 
     constexpr static bool is_able_to_parallelize_merge = false;
     constexpr static bool is_parallelize_merge_prepare_needed = false;
@@ -233,6 +243,8 @@ struct AggregateFunctionUniqThetaData
 template <bool is_exact_, bool argument_is_tuple_>
 struct AggregateFunctionUniqThetaDataForVariadic : AggregateFunctionUniqThetaData
 {
+    using AggregateFunctionUniqThetaData::AggregateFunctionUniqThetaData;
+
     constexpr static bool is_able_to_parallelize_merge = false;
     constexpr static bool is_parallelize_merge_prepare_needed = false;
     constexpr static bool is_variadic = true;
@@ -536,6 +548,26 @@ private:
     }
 };
 
+/// Constructs a `uniq*` state in `place`. `uniqTheta`'s state takes the function's `lg_k`; every other state is
+/// default-constructed, exactly as `IAggregateFunctionDataHelper::create` would.
+///
+/// Note that `IAggregateFunctionDataHelper::addBatchLookupTable8` constructs states with `new Data` directly, bypassing
+/// `create`. It does so only for states of at most 16 bytes, which `ThetaSketchData` no longer is since it carries
+/// `lg_k`, so a `uniqTheta(lg_k)` state is never built with the default `lg_k` that way.
+template <typename Data>
+void createUniqState(AggregateDataPtr __restrict place, [[maybe_unused]] UInt8 theta_lg_k)
+{
+#if USE_DATASKETCHES
+    if constexpr (std::is_base_of_v<AggregateFunctionUniqThetaData, Data>)
+    {
+        static_assert(sizeof(Data) > 16, "uniqTheta state must stay out of addBatchLookupTable8's direct-construction path");
+        new (place) Data(theta_lg_k);
+    }
+    else
+#endif
+        new (place) Data;
+}
+
 }
 
 
@@ -549,10 +581,18 @@ private:
     static constexpr bool is_able_to_parallelize_merge = Data::is_able_to_parallelize_merge;
     static constexpr bool is_parallelize_merge_prepare_needed = Data::is_parallelize_merge_prepare_needed;
 
+    UInt8 theta_lg_k = UNIQ_THETA_DEFAULT_LG_K;
+
 public:
-    explicit AggregateFunctionUniq(const DataTypes & argument_types_)
-        : IAggregateFunctionDataHelper<Data, AggregateFunctionUniq<T, ColumnType, Data>>(argument_types_, {}, std::make_shared<DataTypeUInt64>())
+    explicit AggregateFunctionUniq(const DataTypes & argument_types_, const Array & params_ = {}, UInt8 theta_lg_k_ = UNIQ_THETA_DEFAULT_LG_K)
+        : IAggregateFunctionDataHelper<Data, AggregateFunctionUniq<T, ColumnType, Data>>(argument_types_, params_, std::make_shared<DataTypeUInt64>())
+        , theta_lg_k(theta_lg_k_)
     {
+    }
+
+    void create(AggregateDataPtr __restrict place) const override /// NOLINT
+    {
+        detail::createUniqState<Data>(place, theta_lg_k);
     }
 
     String getName() const override { return Data::getName(); }
@@ -676,15 +716,22 @@ private:
     static constexpr size_t argument_is_tuple = Data::argument_is_tuple;
 
     size_t num_args = 0;
+    UInt8 theta_lg_k = UNIQ_THETA_DEFAULT_LG_K;
 
 public:
-    explicit AggregateFunctionUniqVariadic(const DataTypes & arguments)
-        : IAggregateFunctionDataHelper<Data, AggregateFunctionUniqVariadic<Data>>(arguments, {}, std::make_shared<DataTypeUInt64>())
+    explicit AggregateFunctionUniqVariadic(const DataTypes & arguments, const Array & params_ = {}, UInt8 theta_lg_k_ = UNIQ_THETA_DEFAULT_LG_K)
+        : IAggregateFunctionDataHelper<Data, AggregateFunctionUniqVariadic<Data>>(arguments, params_, std::make_shared<DataTypeUInt64>())
+        , theta_lg_k(theta_lg_k_)
     {
         if (argument_is_tuple)
             num_args = typeid_cast<const DataTypeTuple &>(*arguments[0]).getElements().size();
         else
             num_args = arguments.size();
+    }
+
+    void create(AggregateDataPtr __restrict place) const override /// NOLINT
+    {
+        detail::createUniqState<Data>(place, theta_lg_k);
     }
 
     String getName() const override { return Data::getName(); }

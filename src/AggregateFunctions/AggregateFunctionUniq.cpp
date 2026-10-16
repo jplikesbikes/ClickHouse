@@ -10,6 +10,7 @@
 #include <DataTypes/DataTypeIPv4andIPv6.h>
 
 #include <Core/Settings.h>
+#include <Common/FieldVisitorConvertToNumber.h>
 
 namespace DB
 {
@@ -22,6 +23,7 @@ namespace Setting
 namespace ErrorCodes
 {
     extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
+    extern const int ARGUMENT_OUT_OF_BOUND;
 }
 
 
@@ -29,15 +31,16 @@ namespace
 {
 
 template <typename Data>
-AggregateFunctionPtr createUniqWithNumericType(const IDataType & argument_type, const DataTypes & argument_types)
+AggregateFunctionPtr createUniqWithNumericType(
+    const IDataType & argument_type, const DataTypes & argument_types, const Array & params, UInt8 theta_lg_k)
 {
     WhichDataType which(argument_type);
 #define DISPATCH(TYPE) \
-    if (which.idx == TypeIndex::TYPE) return std::make_shared<AggregateFunctionUniq<TYPE, ColumnVector<TYPE>, Data>>(argument_types);
+    if (which.idx == TypeIndex::TYPE) return std::make_shared<AggregateFunctionUniq<TYPE, ColumnVector<TYPE>, Data>>(argument_types, params, theta_lg_k);
     FOR_NUMERIC_TYPES(DISPATCH)
 #undef DISPATCH
-    if (which.idx == TypeIndex::Enum8) return std::make_shared<AggregateFunctionUniq<Int8, ColumnVector<Int8>, Data>>(argument_types);
-    if (which.idx == TypeIndex::Enum16) return std::make_shared<AggregateFunctionUniq<Int16, ColumnVector<Int16>, Data>>(argument_types);
+    if (which.idx == TypeIndex::Enum8) return std::make_shared<AggregateFunctionUniq<Int8, ColumnVector<Int8>, Data>>(argument_types, params, theta_lg_k);
+    if (which.idx == TypeIndex::Enum16) return std::make_shared<AggregateFunctionUniq<Int16, ColumnVector<Int16>, Data>>(argument_types, params, theta_lg_k);
     return nullptr;
 }
 
@@ -59,10 +62,8 @@ AggregateFunctionPtr createUniqWithNumericType(const IDataType & argument_type, 
   */
 template <typename Data, template <bool, bool> typename DataForVariadic>
 AggregateFunctionPtr
-createAggregateFunctionUniq(const std::string & name, const DataTypes & argument_types, const Array & params, const Settings *)
+createAggregateFunctionUniqImpl(const std::string & name, const DataTypes & argument_types, const Array & params, UInt8 theta_lg_k)
 {
-    assertNoParameters(name, params);
-
     if (argument_types.empty())
         throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
             "Incorrect number of arguments for aggregate function {}", name);
@@ -73,7 +74,7 @@ createAggregateFunctionUniq(const std::string & name, const DataTypes & argument
     {
         const IDataType & argument_type = *argument_types[0];
 
-        AggregateFunctionPtr res(createUniqWithNumericType<Data>(*argument_types[0], argument_types));
+        AggregateFunctionPtr res(createUniqWithNumericType<Data>(*argument_types[0], argument_types, params, theta_lg_k));
 
         WhichDataType which(argument_type);
         if (res)
@@ -83,57 +84,93 @@ createAggregateFunctionUniq(const std::string & name, const DataTypes & argument
         if (which.isDate())
         {
             using T = DataTypeDate::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isDate32())
         {
             using T = DataTypeDate32::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isDateTime())
         {
             using T = DataTypeDateTime::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isString())
         {
             using T = std::string_view;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnString, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnString, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isFixedString())
         {
             using T = std::string_view;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnFixedString, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnFixedString, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isUUID())
         {
             using T = DataTypeUUID::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isIPv4())
         {
             using T = DataTypeIPv4::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isIPv6())
         {
             using T = DataTypeIPv6::FieldType;
-            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types);
+            return std::make_shared<AggregateFunctionUniq<T, ColumnVector<T>, Data>>(argument_types, params, theta_lg_k);
         }
         if (which.isTuple())
         {
             if (use_exact_hash_function)
-                return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<true, true>>>(argument_types);
+                return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<true, true>>>(argument_types, params, theta_lg_k);
 
-            return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<false, true>>>(argument_types);
+            return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<false, true>>>(argument_types, params, theta_lg_k);
         }
     }
 
     /// "Variadic" method also works as a fallback generic case for single argument.
     if (use_exact_hash_function)
-        return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<true, false>>>(argument_types);
-    return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<false, false>>>(argument_types);
+        return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<true, false>>>(argument_types, params, theta_lg_k);
+    return std::make_shared<AggregateFunctionUniqVariadic<DataForVariadic<false, false>>>(argument_types, params, theta_lg_k);
 }
+
+template <typename Data, template <bool, bool> typename DataForVariadic>
+AggregateFunctionPtr
+createAggregateFunctionUniq(const std::string & name, const DataTypes & argument_types, const Array & params, const Settings *)
+{
+    assertNoParameters(name, params);
+    return createAggregateFunctionUniqImpl<Data, DataForVariadic>(name, argument_types, params, UNIQ_THETA_DEFAULT_LG_K);
+}
+
+#if USE_DATASKETCHES
+/// `uniqTheta[(lg_k)](x[, ...])`. The parameter is kept in the function's parameters, so it is part of the state type
+/// (`AggregateFunction(uniqTheta(16), UInt64)`) and the precision survives every round trip through storage: the
+/// serialized compact sketch does not record k, and `read` trims to whatever k the function was created with.
+AggregateFunctionPtr
+createAggregateFunctionUniqTheta(const std::string & name, const DataTypes & argument_types, const Array & params, const Settings *)
+{
+    UInt8 lg_k = datasketches::theta_constants::DEFAULT_LG_K;
+
+    if (!params.empty())
+    {
+        if (params.size() != 1)
+            throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH, "Aggregate function {} requires one parameter or less.", name);
+
+        UInt64 lg_k_param = applyVisitor(FieldVisitorConvertToNumber<UInt64>(), params[0]);
+
+        if (lg_k_param < datasketches::theta_constants::MIN_LG_K || lg_k_param > datasketches::theta_constants::MAX_LG_K)
+            throw Exception(ErrorCodes::ARGUMENT_OUT_OF_BOUND, "Parameter for aggregate function {} is out of range: [{}, {}].",
+                name, datasketches::theta_constants::MIN_LG_K, datasketches::theta_constants::MAX_LG_K);
+
+        lg_k = static_cast<UInt8>(lg_k_param);
+    }
+
+    return createAggregateFunctionUniqImpl<AggregateFunctionUniqThetaData, AggregateFunctionUniqThetaDataForVariadic>(
+        name, argument_types, params, lg_k);
+}
+#endif
 
 template <bool is_exact, template <typename, bool> typename Data, template <bool, bool, bool> typename DataForVariadic, bool is_able_to_parallelize_merge>
 AggregateFunctionPtr
@@ -440,15 +477,24 @@ Calculates the approximate number of different argument values, using the [Theta
 This function calculates a hash for all parameters in the aggregate, then uses it in calculations.
 It uses the [KMV](https://datasketches.apache.org/docs/Theta/InverseEstimate.html) algorithm to approximate the number of different argument values.
 
-4096(2^12) 64-bit sketch are used.
-The size of the state is about 41 KB.
+By default 4096 (2^12) 64-bit hashes are retained, and the size of the state is about 41 KB. The optional `lg_k`
+parameter sets the number of retained hashes to 2^lg_k: each step up doubles the state and divides the error by about
+√2.
 
-The relative error is 3.125% (95% confidence), see the [relative error table](https://datasketches.apache.org/docs/Theta/ThetaErrorTable.html) for detail.
+With the default, the relative error is 3.125% (95% confidence), see the [relative error table](https://datasketches.apache.org/docs/Theta/ThetaErrorTable.html) for detail.
+
+The parameter is part of the state type: `uniqThetaState(16)(x)` returns `AggregateFunction(uniqTheta(16), T)`.
+`uniqThetaUnion`, `uniqThetaIntersect` and `uniqThetaNot` accept states with different `lg_k` and return a state with
+the first argument's `lg_k`. Intersecting with a larger-`lg_k` state is where a larger `lg_k` pays off: the result
+keeps the larger state's sampling rate. A union, by contrast, is trimmed to the first argument's `lg_k`.
 </details>
     )";
     FunctionDocumentation::Syntax syntax_uniqTheta = R"(
-uniqTheta(x[, ...])
+uniqTheta[(lg_k)](x[, ...])
     )";
+    FunctionDocumentation::Parameters parameters_uniqTheta = {
+        {"lg_k", "Optional. The base-2 logarithm of the number of hashes retained in the sketch. The default value is 12 (4096 hashes). Range: [5, 26].", {"UInt8"}}
+    };
     FunctionDocumentation::Arguments arguments_uniqTheta = {
         {"x", "The function takes a variable number of parameters.", {"Tuple(T)", "Array(T)", "Date", "DateTime", "String", "(U)Int*", "Float*", "Decimal"}}
     };
@@ -479,10 +525,10 @@ FROM example_theta;
     };
     FunctionDocumentation::IntroducedIn introduced_in_uniqTheta = {21, 6};
     FunctionDocumentation::Category category_uniqTheta = FunctionDocumentation::Category::AggregateFunction;
-    FunctionDocumentation documentation_uniqTheta = {description_uniqTheta, syntax_uniqTheta, arguments_uniqTheta, {}, returned_value_uniqTheta, examples_uniqTheta, introduced_in_uniqTheta, category_uniqTheta};
+    FunctionDocumentation documentation_uniqTheta = {description_uniqTheta, syntax_uniqTheta, arguments_uniqTheta, parameters_uniqTheta, returned_value_uniqTheta, examples_uniqTheta, introduced_in_uniqTheta, category_uniqTheta};
 
     factory.registerFunction("uniqTheta",
-        {createAggregateFunctionUniq<AggregateFunctionUniqThetaData, AggregateFunctionUniqThetaDataForVariadic>, documentation_uniqTheta, properties});
+        {createAggregateFunctionUniqTheta, documentation_uniqTheta, properties});
 #endif
 
 }

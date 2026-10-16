@@ -6,6 +6,7 @@
 
 #include <boost/noncopyable.hpp>
 #include <memory>
+#include <theta_constants.hpp>
 #include <theta_sketch.hpp>
 #include <theta_union.hpp>
 #include <theta_intersection.hpp>
@@ -31,18 +32,23 @@ private:
     std::unique_ptr<datasketches::update_theta_sketch> sk_update;
     /// Used for merging
     std::unique_ptr<datasketches::theta_union> sk_union;
+    /// log2 of the nominal number of retained entries (k). Every sketch and union this object builds uses it, and the
+    /// union is where a state is trimmed back to k - on `read`, `merge`, `intersect` and `aNotB` alike - so this is the
+    /// precision of everything the state holds. It is a property of the aggregate function (`uniqTheta(lg_k)`), not of
+    /// the serialized bytes: the compact sketch format does not record k.
+    uint8_t lg_k = datasketches::theta_constants::DEFAULT_LG_K;
 
     datasketches::update_theta_sketch * getSkUpdate()
     {
         if (!sk_update)
-            sk_update = std::make_unique<datasketches::update_theta_sketch>(datasketches::update_theta_sketch::builder().build());
+            sk_update = std::make_unique<datasketches::update_theta_sketch>(datasketches::update_theta_sketch::builder().set_lg_k(lg_k).build());
         return sk_update.get();
     }
 
     datasketches::theta_union * getSkUnion()
     {
         if (!sk_union)
-            sk_union = std::make_unique<datasketches::theta_union>(datasketches::theta_union::builder().build());
+            sk_union = std::make_unique<datasketches::theta_union>(datasketches::theta_union::builder().set_lg_k(lg_k).build());
         return sk_union.get();
     }
 
@@ -50,6 +56,9 @@ public:
     using value_type = Key;
 
     ThetaSketchData() = default;
+    /// `lg_k_` must already be validated against [theta_constants::MIN_LG_K, theta_constants::MAX_LG_K]: the
+    /// `datasketches` builders throw `std::invalid_argument` outside it, which is not a `DB::Exception`.
+    explicit ThetaSketchData(uint8_t lg_k_) : lg_k(lg_k_) {}
     ~ThetaSketchData() = default;
 
     /// Insert original value without hash, as `datasketches::update_theta_sketch.update` will do the hash internal.
